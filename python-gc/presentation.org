@@ -1,0 +1,414 @@
+#+TITLE: Knowing your Garbage Collector
+#+AUTHOR: Francisco Fernández Castaño @fcofdezc
+#+EMAIL: francisco.fernandez.castano@gmail.com
+#+OPTIONS: ':nil *:t -:t ::t <:t H:3 \n:nil ^:t arch:headline
+#+OPTIONS: author:t c:nil creator:comment d:(not "LOGBOOK") date:t
+#+OPTIONS: e:t email:nil f:t inline:t num:nil p:nil pri:nil stat:t
+#+OPTIONS: tags:t tasks:t tex:t timestamp:t toc:nil todo:t |:t
+#+DESCRIPTION:
+#+EXCLUDE_TAGS: noexport
+#+KEYWORDS:
+#+LANGUAGE: en
+#+SELECT_TAGS: export
+
+#+WWW: http://fcofdez.github.io
+#+GITHUB: http://github.com/fcofdez
+#+TWITTER: fcofdezc
+
+#+ICON: images/python-logo.png
+
+* Agenda
+
+- Introduction
+  * Motivation
+  * Known problems
+  * Definitions
+  * Garbage collection trade-offs
+- CPython implementation - Reference Counting
+  * Basic objects
+  * Reference Counting algorithm
+  * Cycles detector
+- PyPy approach
+  * Description
+  * Incminmark
+
+* Introduction
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+** Motivation
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+*** Python usage
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/business.png]]
+#+END_CENTER
+
+** Known problems   
+- Dealing manually with memory is hard
+- Memory leaks
+- Ownership
+- Double frees
+#+BEGIN_SRC c
+int * func ( void )
+{
+   int * num = malloc (10 * sizeof ( int ));;
+   /* ... */
+   return num ;
+}
+#+END_SRC
+** Known problems
+- Dangling Pointers
+#+BEGIN_SRC c
+int * func ( void )
+{
+int num = 1234;
+/* ... */
+return &num;
+}
+#+END_SRC
+*** Some solutions
+- C++
+  * [[https://en.wikipedia.org/wiki/Resource_Acquisition_Is_Initialization][RAII]]
+  * [[http://en.cppreference.com/w/cpp/memory/unique_ptr][uniqueptr]]
+  * [[http://en.cppreference.com/w/cpp/memory/shared_ptr][sharedptr]]
+- Rust 
+*** Scenarios where manual memory management is mandatory
+- Embedded systems
+- Performance constrained applications
+- Applications that need determinism
+** What is garbage collection?
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+*** First time
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/mcc.jpg]]
+#+END_CENTER
+- [[http://www-formal.stanford.edu/jmc/recursive.pdf][Recursive Functions of Symbolic Expressions and Their Computation by Machine, Part I]]
+
+*** Formal definition
+#+BEGIN_QUOTE
+  Garbage collection is automatic memory management. While the mutator runs , it \\
+  routinely allocates memory from the heap. If more memory than available is \\
+  needed, the collector reclaims unused memory and returns it to the heap. 
+#+END_QUOTE
+*** Mutator
+#+BEGIN_QUOTE
+The part of a running program which executes application code.
+#+END_QUOTE
+Our running program
+*** Heap 
+#+BEGIN_QUOTE
+A data structure in which objects may be allocated or deallocated in any order.
+#+END_QUOTE
+*** Collector
+#+BEGIN_QUOTE
+The part of a running program responsible of garbage collection.
+#+END_QUOTE
+Python VM
+*** To know more
+[[http://gchandbook.org/][The Garbage Collection Handbook]]
+** Trade-offs
+- Additional resources consumption.
+- Performance impacts.
+- Unpredictability on when the GC is performed (depending on the algorithm).
+* CPython garbage collector
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+** Reference counting
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+*** Object model
+#+BEGIN_SRC c
+    typedef struct _object {
+      _PyObject_HEAD_EXTRA
+      Py_ssize_t ob_refcnt;
+      struct _typeobject *ob_type;
+    } PyObject;
+#+END_SRC
+*** How does it work? (1)
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+#+END_SRC
+*** How does it work? (2)
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/refcount1.png]]
+#+END_CENTER
+*** How does it work? (3)
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+my_list.append(foo)
+#+END_SRC
+*** How does it work? (4)
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/refcount2.png]]
+#+END_CENTER
+*** What happens under the hood?
+#+BEGIN_SRC c
+static int
+app1(PyListObject *self, PyObject *v)
+{
+    Py_ssize_t n = PyList_GET_SIZE(self);
+    assert (v != NULL);
+    .
+    .
+    .
+    if (list_resize(self, n+1) == -1)
+        return -1;
+    Py_INCREF(v);
+    PyList_SET_ITEM(self, n, v);
+    return 0;
+}
+#+END_SRC
+*** What happens under the hood?
+#+BEGIN_SRC c
+#define Py_INCREF(op) (                         \
+    _Py_INC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
+    ((PyObject*)(op))->ob_refcnt++)
+#+END_SRC
+
+*** How does it work? (4)
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+my_list.append(foo)
+my_list[0] = None
+#+END_SRC
+*** How does it work? (5)
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/refcount1.png]]
+#+END_CENTER
+*** What happens under the hood?
+#+BEGIN_SRC c
+int
+PyList_SetItem(PyObject *op, Py_ssize_t i,
+               PyObject *newitem)
+{
+    PyObject *olditem;
+    PyObject **p;
+    .
+    .
+    .
+    p = ((PyListObject *)op) -> ob_item + i;
+    olditem = *p;
+    *p = newitem;
+    Py_DECREF(olditem);
+    return 0;
+}
+#+END_SRC
+*** What happens under the hood?
+#+BEGIN_SRC c
+#define Py_DECREF(op)                                   \
+    do {                                                \
+        PyObject *_py_decref_tmp = (PyObject *)(op);    \
+        if (_Py_DEC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
+        --(_py_decref_tmp)->ob_refcnt != 0)             \
+            _Py_CHECK_REFCNT(_py_decref_tmp)            \
+        else                                            \
+        _Py_Dealloc(_py_decref_tmp);                    \
+    } while (0)
+#+END_SRC
+*** How does it work? (6)
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+my_list.append(foo)
+my_list[0] = None
+del foo
+#+END_SRC
+*** How does it work? (7)
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/refcount3.png]]
+#+END_CENTER
+*** Wait a minute
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/wait.jpg]]
+#+END_CENTER
+** Cycles
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+*** What's the problem?
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+my_list.append(foo)
+foo.list = my_list
+#+END_SRC
+*** What's the problem?
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 400px
+[[file:./images/cycle1.png]]
+#+END_CENTER
+*** What's the problem?
+#+BEGIN_SRC python
+foo = Foo()
+my_list = []
+my_list.append(foo)
+foo.list = my_list
+del foo
+del my_list
+#+END_SRC
+*** What's the problem?
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/cycle2.png]]
+#+END_CENTER
+- One of the trade-offs of RC
+*** What's the problem?
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/topology.png]]
+#+END_CENTER
+- One of the trade-offs of RC
+*** Algorithm
+#+BEGIN_SRC c
+typedef union _gc_head {
+    struct {
+        union _gc_head *gc_next;
+        union _gc_head *gc_prev;
+        Py_ssize_t gc_refs;
+    } gc;
+    double dummy;  /* force worst-case alignment */
+} PyGC_Head;
+#+END_SRC
+- GC keep track on ~PyGC_Head generation0~ of every new allocated object
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/generations1.png]]
+#+END_CENTER
+*** Algorithm
+#+BEGIN_SRC python
+class dict(object):
+    def tp_traverse(self, fn):
+        for k, v in self.items():
+            fn(k)
+            fn(v)
+
+class list(object):
+    def tp_traverse(self, fn):
+        for v in self:
+            fn(v)
+#+END_SRC
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/substract-refs1.png]]
+#+END_CENTER
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/substract-refs2.png]]
+#+END_CENTER
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 800px
+[[file:./images/generations2.png]]
+#+END_CENTER
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/substract-refs3.png]]
+#+END_CENTER
+*** Algorithm
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/final_generations.png]]
+#+END_CENTER
+** Demo Time!
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+*** Problems
+- Finalizers ~__del__~
+- Weakrefs
+*** Reference counting
+- 😁 Is ~incremental~, as it works, it frees memory
+- 😱 Detecting Cycles is hard
+- 😱 Size overhead on objects
+* PyPy
+  :PROPERTIES:
+  :SLIDE:    segue dark quote
+  :ASIDE:    right bottom
+  :ARTICLE:  flexbox vleft auto-fadein
+  :END:
+** PyPy
+#+BEGIN_CENTER
+[[file:./images/pypy-logo.png]]
+#+END_CENTER
+- Agnostic GC
+- Different implementations over time
+- Nowadays it uses ~incminmark~
+** Young objects
+#+BEGIN_SRC python
+[elem * 2 for elem in elements]
+balance = (a / b / c) * 4
+'asdadsasd-xxx'.replace('x', 'y').replace('a', 'b')
+foo.bar()
+#+END_SRC
+** Memory model
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 600px
+[[file:./images/pypymemory.png]]
+#+END_CENTER
+** GC
+- Minor and Major collection
+- Objects are moved only once
+- Major collection is done incrementally (to avoid long stops)
+** GC
+#+BEGIN_CENTER
+#+ATTR_HTML: :width 600px
+[[file:./images/pypygc.png]]
+#+END_CENTER
+** GC - Mark and Sweep
+#+BEGIN_CENTER
+#+ATTR_HTML: :height 400px
+[[file:./images/mark.gif]]
+#+END_CENTER
+** GC - Mark and Sweep
+- 😁 Can collect cycles
+- 😱 More complex
+- 😱 On full recollection stop the world
+* Questions?
+
+:PROPERTIES:
+:SLIDE: segue
+:ASIDE: right
+:ARTICLE: flexbox vleft auto-fadein
+:END:
+
+* Thank You ˊ~ω~ˋ
+
+:PROPERTIES:
+:SLIDE: thank-you-slide segue
+:ASIDE: right
+:ARTICLE: flexbox vleft auto-fadein
+:END:
